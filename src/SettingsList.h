@@ -203,6 +203,9 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           StrId::STR_CAT_CLIPPINGS),
         SettingInfo::Toggle(StrId::STR_ANNOT_SHOW, &CrossPointSettings::annotationVisibility, "annotationVisibility",
                             StrId::STR_CAT_CLIPPINGS),
+        SettingInfo::Enum(StrId::STR_EXPORT_FORMAT, &CrossPointSettings::exportFormat,
+                          {StrId::STR_EXPORT_FMT_TXT, StrId::STR_EXPORT_FMT_JSON, StrId::STR_EXPORT_FMT_BOTH},
+                          "exportFormat", StrId::STR_CAT_CLIPPINGS),
 
         // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
         SettingInfo::DynamicString(
