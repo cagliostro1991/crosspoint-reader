@@ -42,6 +42,14 @@ void ClipSelectionActivity::onEnter() {
     return;
   }
 
+  // Hold the render lock while we touch shared Section state and assign currentPage.
+  // switchToPage() calls loadPage() (mutating Section/CssParser) and
+  // moves the result into currentPage, which the render task reads under this same
+  // lock — without it, a render firing here would tear-read currentPage. (render()
+  // already runs under the lock, so it calls switchToPage() without re-locking; the
+  // mutex is non-recursive.)
+  RenderLock lock(*this);
+
   savedSectionPage = section.currentPage;
 
   // Load page 0's layout; render() paints it fresh each frame (the previous activity's

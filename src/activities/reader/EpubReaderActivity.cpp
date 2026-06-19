@@ -817,6 +817,15 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 }
 
 void EpubReaderActivity::startClipSelection() {
+  // Serialize against the render task. This method calls loadPage()
+  // (and prewarms glyphs) which mutate the shared Section/CssParser state and the
+  // section file. Without this lock, a rapid double-tap of the clip button fires
+  // this on the main task while an in-flight e-ink render (1-2.5s) is still loading
+  // the same section under its own RenderLock — the two concurrent loadFromCache()
+  // calls race on CssParser::rulesBySelector_ and crash. Every other section-mutating
+  // reader handler takes this same lock; this path was the lone exception.
+  RenderLock lock(*this);
+
   if (!section || !epub) {
     requestUpdate();
     return;
