@@ -33,8 +33,11 @@ void EpubReaderHighlightsActivity::rebuildSorted() {
 
 void EpubReaderHighlightsActivity::onEnter() {
   Activity::onEnter();
-  selectorIndex = 0;
   rebuildSorted();
+  // sorted is ascending by (sectionIdx, sectionPage), so the last row is the
+  // highlight furthest into the book. Land there (list scrolled to the bottom)
+  // rather than at the top — the most recent reading position is the likely target.
+  selectorIndex = sorted.empty() ? 0 : static_cast<int>(sorted.size()) - 1;
   requestUpdate();
 }
 
@@ -171,9 +174,12 @@ void EpubReaderHighlightsActivity::render(RenderLock&&) {
   const int listY = contentY + LINE_HEIGHT;  // Reserve vertical space for title
   const int listHeight = getListHeight(renderer);
 
+  // Title shows the highlight count, e.g. "Highlights (12)".
+  std::string title = tr(STR_HIGHLIGHTS);
+  if (numRecords > 0) title += " (" + std::to_string(numRecords) + ")";
   const int titleX =
-      contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, tr(STR_HIGHLIGHTS), EpdFontFamily::BOLD)) / 2;
-  renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, tr(STR_HIGHLIGHTS), true, EpdFontFamily::BOLD);
+      contentX + (contentWidth - renderer.getTextWidth(UI_12_FONT_ID, title.c_str(), EpdFontFamily::BOLD)) / 2;
+  renderer.drawText(UI_12_FONT_ID, titleX, 15 + contentY, title.c_str(), true, EpdFontFamily::BOLD);
 
   const auto getTitle = [this, &records](int index) {
     return rowTitle(records.at(confirmingDelete >= DELETE_MODE_DISPLAY ? selectorIndex : index));

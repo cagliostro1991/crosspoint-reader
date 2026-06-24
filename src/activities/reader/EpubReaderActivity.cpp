@@ -61,6 +61,14 @@ int clampPercent(int percent) {
   return percent;
 }
 
+// Book-progress percentage (0-100) of a position within a section, matching the number
+// the reader UI shows. pageCount <= 0 yields the chapter-start percentage.
+int bookPercentAt(const Epub& epub, int sectionIdx, int sectionPage, int pageCount) {
+  const float frac =
+      pageCount > 0 ? std::clamp(static_cast<float>(sectionPage) / static_cast<float>(pageCount), 0.0f, 1.0f) : 0.0f;
+  return clampPercent(static_cast<int>(epub.calculateProgress(sectionIdx, frac) * 100.0f + 0.5f));
+}
+
 // SD card folder finished books are moved into. Single source of truth for the path.
 // constexpr ⇒ lives in flash .rodata, no DRAM cost.
 constexpr char READ_FOLDER[] = "/read";
@@ -789,7 +797,23 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
           ok |= ClippingsManager::exportText(epub->getTitle(), epub->getAuthor(), records, chapterTitles);
         }
         if (fmt == CrossPointSettings::EXPORT_JSON || fmt == CrossPointSettings::EXPORT_BOTH) {
-          ok |= ClippingsManager::exportJson(epub->getTitle(), epub->getAuthor(), records, chapterTitles);
+          // Book-progress percentage (0-100) per highlight, parallel to records.
+          // Prefer the exact value captured at highlight time (rec.bookPercent); for
+          // legacy highlights that predate it, estimate from the section cache header
+          // (cheap, no full load — page count reflects current render settings).
+          std::vector<int> percents;
+          percents.reserve(records.size());
+          for (const auto& rec : records) {
+            if (rec.bookPercent >= 0) {
+              // Exact value captured when the highlight was made.
+              percents.push_back(rec.bookPercent);
+              continue;
+            }
+            // Legacy highlight (pre-v9): estimate from the section cache header.
+            const auto pageCount = Section(epub, rec.sectionIdx, renderer).getCachedPageCount();
+            percents.push_back(bookPercentAt(*epub, rec.sectionIdx, rec.sectionPage, pageCount ? *pageCount : 0));
+          }
+          ok |= ClippingsManager::exportJson(epub->getTitle(), epub->getAuthor(), records, chapterTitles, percents);
         }
         if (ok) {
           showExportMessage = true;
@@ -969,6 +993,16 @@ void EpubReaderActivity::startClipSelection() {
               rec.afterEndText = clip.afterEndText;
               rec.midText = clip.midText;
               rec.clipText = clip.text;
+              // Capture the book-progress percentage live, while the section is loaded
+              // — this is the number the reader UI shows and it won't drift if render
+              // settings change later. estimatedTotalPages() rather than pageCount:
+              // with progressive section builds pageCount is a watermark of pages built
+              // so far, not the chapter total. (Export falls back to a computed
+              // estimate only for highlights made before this was stored.)
+              if (section && section->estimatedTotalPages() > 0) {
+                rec.bookPercent = static_cast<int16_t>(
+                    bookPercentAt(*epub, currentSpineIndex, clip.sectionPage, section->estimatedTotalPages()));
+              }
               annotations.add(std::move(rec));
               annotationsDirty = true;
               annotations.save(epub->getCachePath().c_str());

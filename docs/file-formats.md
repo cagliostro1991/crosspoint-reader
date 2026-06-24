@@ -321,7 +321,7 @@ if (parsedSize != fileSize) {
 
 ## `annotations.bin`
 
-### Version 8
+### Version 9
 
 Stores the book's highlights. Unlike `book.bin`/`section.bin`, strings here are
 **u16** length-prefixed (`AnnotationsManager::readString`/`writeString`). Each record
@@ -331,13 +331,16 @@ the full `clipText` of the highlight, so highlights can be deleted by id and exp
 
 Version history: v4 added end-page anchoring fields incrementally; v5 added
 `endSectionPage`; v6 added `wordCount` + before/after context; v7 added `midText`; v8
-added the `id` + `nextId` header counter and `clipText`. `load` still reads v4–v8;
-legacy records (v<8) are assigned ids on load and gain an empty `clipText`.
+added the `id` + `nextId` header counter and `clipText`; v9 added `bookPercent`, the
+book-progress percentage (0–100) captured live at highlight time for export. `load`
+still reads v4–v9; legacy records (v<8) are assigned ids on load and gain an empty
+`clipText`, and records from v<9 get `bookPercent = -1` (export computes an estimate
+from the section cache instead).
 
 ImHex pattern:
 
 ```c++
-#define EXPECTED_VERSION 8
+#define EXPECTED_VERSION 9
 
 struct String {
     u16 length [[hidden]];
@@ -358,6 +361,7 @@ struct AnnotationRecord {
     String afterEndText;
     String midText;
     String clipText [[comment("Full highlighted text, for delete/export")]];
+    s16 bookPercent [[comment("Book-progress % (0-100) at highlight time; -1 if unset")]];
 };
 
 struct AnnotationsBin {

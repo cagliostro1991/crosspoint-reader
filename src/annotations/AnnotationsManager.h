@@ -13,6 +13,10 @@ class AnnotationsManager {
     uint16_t sectionPage = 0;
     uint16_t endSectionPage = 0;
     uint16_t wordCount = 0;
+    // Book-progress percentage (0-100) captured live when the highlight was made,
+    // matching what the reader UI showed. -1 means "not stored" (legacy highlights
+    // made before v9); callers fall back to computing it from the section cache.
+    int16_t bookPercent = -1;
     std::string startText;
     std::string endText;
     std::string beforeStartText;
@@ -36,7 +40,7 @@ class AnnotationsManager {
   size_t size() const { return records.size(); }
 
  private:
-  static constexpr uint8_t FILE_VERSION = 8;
+  static constexpr uint8_t FILE_VERSION = 9;
 
   std::vector<AnnotationRecord> records;
   uint32_t nextId = 1;

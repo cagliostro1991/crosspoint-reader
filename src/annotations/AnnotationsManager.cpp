@@ -88,6 +88,11 @@ bool AnnotationsManager::load(const char* bookCachePath) {
     if (version >= 8) {
       if (!readString(file, rec.clipText)) break;
     }
+    if (version >= 9) {
+      if (file.read(&rec.bookPercent, sizeof(rec.bookPercent)) != sizeof(rec.bookPercent)) break;
+    } else {
+      rec.bookPercent = -1;  // legacy: compute from the section cache at export time
+    }
     records.push_back(std::move(rec));
   }
 
@@ -131,6 +136,7 @@ bool AnnotationsManager::save(const char* bookCachePath) const {
     writeString(file, rec.afterEndText);
     writeString(file, rec.midText);
     writeString(file, rec.clipText);
+    file.write(&rec.bookPercent, sizeof(rec.bookPercent));
   }
 
   file.flush();

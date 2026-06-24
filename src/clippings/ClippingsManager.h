@@ -22,9 +22,11 @@ class ClippingsManager {
 
   // On-demand export to a per-book JSON file (Readwise / Obsidian friendly). Always
   // overwrites /clippings/<title>.json. Streams one object per highlight.
+  // percents is parallel to records: each entry is the book-progress percentage
+  // (0-100) of that highlight's location. Pass an empty vector to omit the field.
   static bool exportJson(const std::string& bookTitle, const std::string& author,
                          const std::vector<AnnotationsManager::AnnotationRecord>& records,
-                         const std::vector<std::string>& chapterTitles);
+                         const std::vector<std::string>& chapterTitles, const std::vector<int>& percents);
 
   // Returns the per-book text export path (/clippings/<title>.txt) for the given title.
   static std::string resolveClippingPath(const std::string& bookTitle);

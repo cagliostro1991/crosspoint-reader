@@ -110,7 +110,7 @@ bool ClippingsManager::exportText(const std::string& bookTitle, const std::strin
 
 bool ClippingsManager::exportJson(const std::string& bookTitle, const std::string& author,
                                   const std::vector<AnnotationsManager::AnnotationRecord>& records,
-                                  const std::vector<std::string>& chapterTitles) {
+                                  const std::vector<std::string>& chapterTitles, const std::vector<int>& percents) {
   Storage.mkdir(CLIPPINGS_DIR);
   const std::string path = resolveJsonPath(bookTitle);
 
@@ -136,6 +136,7 @@ bool ClippingsManager::exportJson(const std::string& bookTitle, const std::strin
     doc["id"] = rec.id;
     doc["sectionIdx"] = rec.sectionIdx;
     doc["page"] = rec.sectionPage + 1;
+    if (i < percents.size()) doc["percent"] = percents[i];
     doc["chapter"] = i < chapterTitles.size() ? chapterTitles[i] : std::string();
     doc["text"] = rec.clipText;
 
