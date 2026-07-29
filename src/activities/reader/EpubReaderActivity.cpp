@@ -26,6 +26,7 @@
 #include "EpubReaderBookmarksActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
+#include "EpubReaderHighlightsActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "KOReaderCredentialStore.h"
@@ -36,6 +37,7 @@
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
 #include "WordRef.h"
+#include "activities/util/ConfirmationActivity.h"
 #include "clippings/ClippingsManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -57,6 +59,14 @@ int clampPercent(int percent) {
     return 100;
   }
   return percent;
+}
+
+// Book-progress percentage (0-100) of a position within a section, matching the number
+// the reader UI shows. pageCount <= 0 yields the chapter-start percentage.
+int bookPercentAt(const Epub& epub, int sectionIdx, int sectionPage, int pageCount) {
+  const float frac =
+      pageCount > 0 ? std::clamp(static_cast<float>(sectionPage) / static_cast<float>(pageCount), 0.0f, 1.0f) : 0.0f;
+  return clampPercent(static_cast<int>(epub.calculateProgress(sectionIdx, frac) * 100.0f + 0.5f));
 }
 
 // SD card folder finished books are moved into. Single source of truth for the path.
@@ -252,18 +262,19 @@ void EpubReaderActivity::openReaderMenu() {
     bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
   }
   const int bookProgressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
-  startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
-                             renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-                             SETTINGS.orientation, !currentPageFootnotes.empty(), !cachedBookmarks.empty()),
-                         [this](const ActivityResult& result) {
-                           // Always apply orientation change even if the menu was cancelled
-                           const auto& menu = std::get<MenuResult>(result.data);
-                           applyOrientation(menu.orientation);
-                           toggleAutoPageTurn(menu.pageTurnOption);
-                           if (!result.isCancelled) {
-                             onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
-                           }
-                         });
+  startActivityForResult(
+      std::make_unique<EpubReaderMenuActivity>(renderer, mappedInput, epub->getTitle(), currentPage, totalPages,
+                                               bookProgressPercent, SETTINGS.orientation, !currentPageFootnotes.empty(),
+                                               !cachedBookmarks.empty(), !annotations.empty()),
+      [this](const ActivityResult& result) {
+        // Always apply orientation change even if the menu was cancelled
+        const auto& menu = std::get<MenuResult>(result.data);
+        applyOrientation(menu.orientation);
+        toggleAutoPageTurn(menu.pageTurnOption);
+        if (!result.isCancelled) {
+          onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
+        }
+      });
 }
 
 void EpubReaderActivity::loop() {
@@ -357,6 +368,11 @@ void EpubReaderActivity::loop() {
 
   if (showBookmarkMessage && (millis() - bookmarkMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
     showBookmarkMessage = false;
+    requestUpdate();
+  }
+
+  if (showExportMessage && (millis() - exportMessageTime) >= ReaderUtils::BOOKMARK_MESSAGE_DURATION_MS) {
+    showExportMessage = false;
     requestUpdate();
   }
 
@@ -718,22 +734,33 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       return;
     }
     case EpubReaderMenuActivity::MenuAction::DELETE_CACHE: {
-      {
-        RenderLock lock(*this);
-        if (epub && section) {
-          uint16_t backupSpine = currentSpineIndex;
-          uint16_t backupPage = section->currentPage;
-          uint16_t backupPageCount = section->pageCount;
-          section.reset();
-          epub->clearCache();
-          epub->setupCacheDir();
-          if (!saveProgress(backupSpine, backupPage, backupPageCount)) {
-            LOG_ERR("ERS", "Failed to save progress before cache clear");
-          }
-        }
-      }
-      onGoHome();
-      return;
+      // Highlights live in the book cache, so confirm first and name how many will be lost.
+      char body[192];
+      snprintf(body, sizeof(body), tr(STR_DELETE_CACHE_CONFIRM), static_cast<int>(annotations.size()));
+      startActivityForResult(
+          std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_DELETE_CACHE), std::string(body)),
+          [this](const ActivityResult& result) {
+            if (result.isCancelled) {
+              requestUpdate();
+              return;
+            }
+            {
+              RenderLock lock(*this);
+              if (epub && section) {
+                uint16_t backupSpine = currentSpineIndex;
+                uint16_t backupPage = section->currentPage;
+                uint16_t backupPageCount = section->pageCount;
+                section.reset();
+                epub->clearCache();
+                epub->setupCacheDir();
+                if (!saveProgress(backupSpine, backupPage, backupPageCount)) {
+                  LOG_ERR("ERS", "Failed to save progress before cache clear");
+                }
+              }
+            }
+            onGoHome();
+          });
+      break;
     }
     case EpubReaderMenuActivity::MenuAction::SCREENSHOT: {
       {
@@ -745,6 +772,55 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::SAVE_CLIPPING: {
       startClipSelection();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::VIEW_HIGHLIGHTS: {
+      if (epub) {
+        startActivityForResult(std::make_unique<EpubReaderHighlightsActivity>(renderer, mappedInput, epub, annotations,
+                                                                              epub->getCachePath()),
+                               progressChangeResultHandler);
+      }
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::EXPORT_CLIPPINGS: {
+      if (epub && !annotations.empty()) {
+        const auto& records = annotations.all();
+        std::vector<std::string> chapterTitles;
+        chapterTitles.reserve(records.size());
+        for (const auto& rec : records) {
+          const int tocIdx = epub->getTocIndexForSpineIndex(rec.sectionIdx);
+          chapterTitles.push_back(tocIdx >= 0 ? epub->getTocItem(tocIdx).title : std::string());
+        }
+        const uint8_t fmt = SETTINGS.exportFormat;
+        bool ok = false;
+        if (fmt == CrossPointSettings::EXPORT_TXT || fmt == CrossPointSettings::EXPORT_BOTH) {
+          ok |= ClippingsManager::exportText(epub->getTitle(), epub->getAuthor(), records, chapterTitles);
+        }
+        if (fmt == CrossPointSettings::EXPORT_JSON || fmt == CrossPointSettings::EXPORT_BOTH) {
+          // Book-progress percentage (0-100) per highlight, parallel to records.
+          // Prefer the exact value captured at highlight time (rec.bookPercent); for
+          // legacy highlights that predate it, estimate from the section cache header
+          // (cheap, no full load — page count reflects current render settings).
+          std::vector<int> percents;
+          percents.reserve(records.size());
+          for (const auto& rec : records) {
+            if (rec.bookPercent >= 0) {
+              // Exact value captured when the highlight was made.
+              percents.push_back(rec.bookPercent);
+              continue;
+            }
+            // Legacy highlight (pre-v9): estimate from the section cache header.
+            const auto pageCount = Section(epub, rec.sectionIdx, renderer).getCachedPageCount();
+            percents.push_back(bookPercentAt(*epub, rec.sectionIdx, rec.sectionPage, pageCount ? *pageCount : 0));
+          }
+          ok |= ClippingsManager::exportJson(epub->getTitle(), epub->getAuthor(), records, chapterTitles, percents);
+        }
+        if (ok) {
+          showExportMessage = true;
+          exportMessageTime = millis();
+        }
+      }
+      requestUpdate();
       break;
     }
     case EpubReaderMenuActivity::MenuAction::SYNC: {
@@ -765,6 +841,15 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
 }
 
 void EpubReaderActivity::startClipSelection() {
+  // Serialize against the render task. This method calls loadPage()
+  // (and prewarms glyphs) which mutate the shared Section/CssParser state and the
+  // section file. Without this lock, a rapid double-tap of the clip button fires
+  // this on the main task while an in-flight e-ink render (1-2.5s) is still loading
+  // the same section under its own RenderLock — the two concurrent loadFromCache()
+  // calls race on CssParser::rulesBySelector_ and crash. Every other section-mutating
+  // reader handler takes this same lock; this path was the lone exception.
+  RenderLock lock(*this);
+
   if (!section || !epub) {
     requestUpdate();
     return;
@@ -791,9 +876,34 @@ void EpubReaderActivity::startClipSelection() {
     return w;
   };
 
+  // On-demand SD-card fonts keep only an 8-glyph overflow buffer, so measuring a page's
+  // words one by one re-reads glyphs from the SD card and thrashes (~35 ms/word). The normal
+  // render path avoids this by prewarming the page's glyphs resident first; do the same here.
+  auto* fcm = renderer.getFontCacheManager();
+
   for (int pi = 0; pi < pagesToLoad; ++pi) {
     auto page = section->loadPage(startPage + pi);
     if (!page) break;
+
+    // Prewarm this page's glyphs, bucketed by style variant (low 2 bits), matching the
+    // render path's per-style prewarm so only glyphs actually used are loaded.
+    if (fcm) {
+      std::string styleText[4];
+      for (const auto& el : page->elements) {
+        if (el->getTag() != TAG_PageLine) continue;
+        const auto& line = static_cast<const PageLine&>(*el);
+        if (!line.getBlock()) continue;
+        const auto& block = *line.getBlock();
+        for (uint16_t i = 0; i < block.wordCount(); ++i) {
+          const auto s = block.wordStyle(i);
+          styleText[s & 0x03] += block.wordText(i);
+          styleText[s & 0x03] += ' ';
+        }
+      }
+      for (uint8_t k = 0; k < 4; ++k) {
+        if (!styleText[k].empty()) fcm->prewarmCache(readerFontId, styleText[k].c_str(), 1u << k);
+      }
+    }
 
     for (const auto& el : page->elements) {
       if (el->getTag() != TAG_PageLine) continue;
@@ -836,7 +946,6 @@ void EpubReaderActivity::startClipSelection() {
     };
     auto endsWithHyphen = [](const std::string& w) -> bool { return !w.empty() && w.back() == '-'; };
     const int indentThreshold = renderer.getLineHeight(readerFontId) / 2;
-    LOG_DBG("CLIP", "Words: %d, indentThreshold: %d", words.size(), indentThreshold);
     int prevLineFirstIdx = -1;
     for (int i = 0; i < static_cast<int>(words.size()); ++i) {
       const bool isNewLine = (i == 0) || (words[i].pageIdx != words[i - 1].pageIdx) || (words[i].y != words[i - 1].y);
@@ -847,13 +956,9 @@ void EpubReaderActivity::startClipSelection() {
                             !endsWithHyphen(words[i - 1].text);
         if (byEm || byXpos) {
           words[i].paragraphStart = true;
-          LOG_DBG("CLIP", "PS w[%d] x=%d prevX=%d reason=%s text=%.20s", i, words[i].x,
-                  prevLineFirstIdx >= 0 ? words[prevLineFirstIdx].x : -1, byEm ? "em" : "xpos", words[i].text.c_str());
         }
         prevLineFirstIdx = i;
       }
-      LOG_DBG("CLIP", "W[%d] x=%d y=%d w=%d pg=%d ps=%d text=%.30s", i, words[i].x, words[i].y, words[i].w,
-              words[i].pageIdx, words[i].paragraphStart, words[i].text.c_str());
     }
   }
 
@@ -864,7 +969,7 @@ void EpubReaderActivity::startClipSelection() {
       std::make_unique<ClipSelectionActivity>(renderer, mappedInput, std::move(words), epub->getTitle(),
                                               epub->getAuthor(), chapterTitle, startPage + 1, readerFontId, *section,
                                               startPage, mTop, mLeft, ClipSelectionActivity::Config{}),
-      [this, chapterTitle, startPage](const ActivityResult& result) {
+      [this, chapterTitle](const ActivityResult& result) {
         if (!result.isCancelled) {
           const auto& clip = std::get<ClippingResult>(result.data);
           LOG_DBG(
@@ -873,7 +978,9 @@ void EpubReaderActivity::startClipSelection() {
               clip.text.c_str(), clip.startText.c_str(), clip.endText.c_str(), clip.sectionPage, clip.endSectionPage,
               clip.wordCount, clip.beforeStartText.c_str(), clip.afterEndText.c_str());
           if (!clip.text.empty()) {
-            ClippingsManager::saveClipping(epub->getTitle(), epub->getAuthor(), chapterTitle, startPage + 1, clip.text);
+            // The on-device store is the source of truth (deletion-accurate; the clean
+            // per-book export reads from it on demand). Independently, when the Kindle
+            // log is enabled, append this highlight once to /My Clippings.txt now.
             if (!clip.startText.empty() && !clip.endText.empty()) {
               AnnotationsManager::AnnotationRecord rec;
               rec.sectionIdx = static_cast<uint16_t>(currentSpineIndex);
@@ -885,10 +992,25 @@ void EpubReaderActivity::startClipSelection() {
               rec.beforeStartText = clip.beforeStartText;
               rec.afterEndText = clip.afterEndText;
               rec.midText = clip.midText;
+              rec.clipText = clip.text;
+              // Capture the book-progress percentage live, while the section is loaded
+              // — this is the number the reader UI shows and it won't drift if render
+              // settings change later. estimatedTotalPages() rather than pageCount:
+              // with progressive section builds pageCount is a watermark of pages built
+              // so far, not the chapter total. (Export falls back to a computed
+              // estimate only for highlights made before this was stored.)
+              if (section && section->estimatedTotalPages() > 0) {
+                rec.bookPercent = static_cast<int16_t>(
+                    bookPercentAt(*epub, currentSpineIndex, clip.sectionPage, section->estimatedTotalPages()));
+              }
               annotations.add(std::move(rec));
               annotationsDirty = true;
               annotations.save(epub->getCachePath().c_str());
               annotationsDirty = false;
+            }
+            if (SETTINGS.clippingLog) {
+              ClippingsManager::appendToLog(epub->getTitle(), epub->getAuthor(), chapterTitle, clip.sectionPage + 1,
+                                            clip.text);
             }
           }
         }
@@ -1348,6 +1470,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   if (showBookmarkMessage) {
     GUI.drawPopup(renderer, bookmarkRemoved ? tr(STR_BOOKMARK_REMOVED) : tr(STR_BOOKMARK_ADDED));
+  }
+
+  if (showExportMessage) {
+    GUI.drawPopup(renderer, tr(STR_HIGHLIGHTS_EXPORTED));
   }
 }
 

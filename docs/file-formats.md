@@ -318,3 +318,61 @@ if (parsedSize != fileSize) {
     std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
 }
 ```
+
+## `annotations.bin`
+
+### Version 9
+
+Stores the book's highlights. Unlike `book.bin`/`section.bin`, strings here are
+**u16** length-prefixed (`AnnotationsManager::readString`/`writeString`). Each record
+carries a stable `id` (unique within the book, assigned from the `nextId` counter) and
+the full `clipText` of the highlight, so highlights can be deleted by id and exported
+(TXT/JSON) without re-deriving their text.
+
+Version history: v4 added end-page anchoring fields incrementally; v5 added
+`endSectionPage`; v6 added `wordCount` + before/after context; v7 added `midText`; v8
+added the `id` + `nextId` header counter and `clipText`; v9 added `bookPercent`, the
+book-progress percentage (0–100) captured live at highlight time for export. `load`
+still reads v4–v9; legacy records (v<8) are assigned ids on load and gain an empty
+`clipText`, and records from v<9 get `bookPercent = -1` (export computes an estimate
+from the section cache instead).
+
+ImHex pattern:
+
+```c++
+#define EXPECTED_VERSION 9
+
+struct String {
+    u16 length [[hidden]];
+    char data[length] [[comment("UTF-8 string data")]];
+} [[sealed, format("format_string")]];
+
+fn format_string(String s) { return s.data; };
+
+struct AnnotationRecord {
+    u32 id [[comment("Stable per-book highlight id")]];
+    u16 sectionIdx;
+    u16 sectionPage;
+    u16 endSectionPage;
+    u16 wordCount;
+    String startText;
+    String endText;
+    String beforeStartText;
+    String afterEndText;
+    String midText;
+    String clipText [[comment("Full highlighted text, for delete/export")]];
+    s16 bookPercent [[comment("Book-progress % (0-100) at highlight time; -1 if unset")]];
+};
+
+struct AnnotationsBin {
+    u8 version;
+    if (version != EXPECTED_VERSION) {
+        std::error(std::format("Unsupported version: {} (expected {})", version, EXPECTED_VERSION));
+    }
+    u16 count;
+    u32 nextId [[comment("Next id to assign")]];
+    AnnotationRecord records[count];
+};
+
+AnnotationsBin annotations @ 0x00;
+```

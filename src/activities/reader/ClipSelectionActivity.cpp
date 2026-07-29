@@ -1,12 +1,12 @@
 #include "ClipSelectionActivity.h"
 
 #include <CrossPointSettings.h>
+#include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
 
 #include <algorithm>
-#include <cstring>
 
 #include "../ActivityResult.h"
 #include "MappedInputManager.h"
@@ -42,27 +42,33 @@ void ClipSelectionActivity::onEnter() {
     return;
   }
 
+  // Hold the render lock while we touch shared Section state and assign currentPage.
+  // switchToPage() calls loadPage() (mutating Section/CssParser) and
+  // moves the result into currentPage, which the render task reads under this same
+  // lock — without it, a render firing here would tear-read currentPage. (render()
+  // already runs under the lock, so it calls switchToPage() without re-locking; the
+  // mutex is non-recursive.)
+  RenderLock lock(*this);
+
   savedSectionPage = section.currentPage;
-  savedBufferSize = renderer.getBufferSize();
-  savedBuffer = makeUniqueNoThrow<uint8_t[]>(savedBufferSize);
-  if (!savedBuffer) {
-    LOG_ERR("CLIP", "malloc failed: %u bytes", savedBufferSize);
+
+  // Load page 0's layout; render() paints it fresh each frame (the previous activity's
+  // menu may still be on screen when onEnter() runs).
+  switchToPage(0);
+  if (!currentPage) {
+    LOG_ERR("CLIP", "Failed to load initial page");
     ActivityResult result;
     result.isCancelled = true;
     setResult(std::move(result));
     finish();
     return;
   }
-
-  // Re-render page 0 to get a clean framebuffer — the previous activity (menu)
-  // may still be painted on screen when onEnter() runs.
-  switchToPage(0);
   requestUpdate();
 }
 
 void ClipSelectionActivity::onExit() {
   section.currentPage = savedSectionPage;
-  savedBuffer.reset();
+  currentPage.reset();
   Activity::onExit();
 }
 
@@ -169,6 +175,45 @@ void ClipSelectionActivity::loop() {
     });
   }
 
+  // Double-tap a navigation button to jump to a page or line edge — handy when the text
+  // to highlight is near an edge. Down/Up jump to the bottom/top of the current page;
+  // Right/Left jump to the last/first word of the current line. Runs after the per-button
+  // nav above so the jump overrides that release's single step.
+  constexpr unsigned long CLIP_DOUBLE_TAP_MS = 250;
+  const unsigned long nowMs = millis();
+  if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    if (nowMs - lastDownReleaseMs <= CLIP_DOUBLE_TAP_MS) {
+      jumpToPageEdge(true);
+      lastDownReleaseMs = 0;  // require two fresh taps for another jump
+    } else {
+      lastDownReleaseMs = nowMs;
+    }
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+    if (nowMs - lastUpReleaseMs <= CLIP_DOUBLE_TAP_MS) {
+      jumpToPageEdge(false);
+      lastUpReleaseMs = 0;
+    } else {
+      lastUpReleaseMs = nowMs;
+    }
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    if (nowMs - lastRightReleaseMs <= CLIP_DOUBLE_TAP_MS) {
+      jumpToLineEdge(true);
+      lastRightReleaseMs = 0;
+    } else {
+      lastRightReleaseMs = nowMs;
+    }
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Left)) {
+    if (nowMs - lastLeftReleaseMs <= CLIP_DOUBLE_TAP_MS) {
+      jumpToLineEdge(false);
+      lastLeftReleaseMs = 0;
+    } else {
+      lastLeftReleaseMs = nowMs;
+    }
+  }
+
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (startMarkIdx == -1) {
       startMarkIdx = cursorIdx;
@@ -211,15 +256,16 @@ void ClipSelectionActivity::loop() {
 }
 
 void ClipSelectionActivity::render(RenderLock&&) {
-  if (!savedBuffer) return;
-
   if (needsPageSwitch) {
     switchToPage(words[cursorIdx].pageIdx);
     needsPageSwitch = false;
   }
+  if (!currentPage) return;
 
-  // Restore the saved page framebuffer, then draw highlights on top
-  memcpy(renderer.getFrameBuffer(), savedBuffer.get(), savedBufferSize);
+  // Re-render the page fresh, then draw the selection/cursor on top. Glyphs were prewarmed
+  // resident in switchToPage(), so this redraw is cheap and avoids holding a 48 KB copy.
+  renderer.clearScreen();
+  currentPage->render(renderer, fontId, marginLeft, marginTop);
   drawHighlights();
 
   if (config.render.showButtonHints) {
@@ -242,10 +288,28 @@ void ClipSelectionActivity::switchToPage(int pageIdx) {
     return;
   }
 
-  renderer.clearScreen();
-  page->render(renderer, fontId, marginLeft, marginTop);
-  // displayBuffer is intentionally omitted here — render() always controls the final display call
-  memcpy(savedBuffer.get(), renderer.getFrameBuffer(), savedBufferSize);
+  // Prewarm this page's glyphs PERSISTENTLY (per style), not via a PrewarmScope whose
+  // destructor clears the cache. The glyphs must stay resident after this returns because
+  // render() repaints the whole page plus the cursor/selection words on every cursor move;
+  // with on-demand SD-card fonts a cold redraw re-reads each glyph from the 8-entry overflow
+  // buffer and takes seconds. Prewarm from the activity's own word list — exactly the glyphs
+  // render() will redraw.
+  auto* fcm = renderer.getFontCacheManager();
+  if (fcm) {
+    std::string styleText[4];
+    for (const auto& w : words) {
+      if (w.pageIdx != pageIdx) continue;
+      const uint8_t k = static_cast<uint8_t>(w.style & 0x03);
+      styleText[k] += w.text;
+      styleText[k] += ' ';
+    }
+    for (uint8_t k = 0; k < 4; ++k) {
+      if (!styleText[k].empty()) fcm->prewarmCache(fontId, styleText[k].c_str(), 1u << k);
+    }
+  }
+
+  // Cache the layout only — render() paints it. No 48 KB framebuffer copy is held.
+  currentPage = std::move(page);
   currentDisplayPage = pageIdx;
 }
 
@@ -347,4 +411,41 @@ int ClipSelectionActivity::lineEndBackward(int idx) const {
     first = i;
   }
   return first;
+}
+
+void ClipSelectionActivity::jumpToPageEdge(bool bottom) {
+  const int total = static_cast<int>(words.size());
+  if (total == 0) return;
+  const int page = words[cursorIdx].pageIdx;
+
+  int target = cursorIdx;
+  if (bottom) {
+    for (int i = cursorIdx; i < total && words[i].pageIdx == page; ++i) target = i;
+  } else {
+    for (int i = cursorIdx; i >= 0 && words[i].pageIdx == page; --i) target = i;
+  }
+
+  if (target != cursorIdx) {
+    cursorIdx = target;  // same page — no needsPageSwitch
+    requestUpdate();
+  }
+}
+
+void ClipSelectionActivity::jumpToLineEdge(bool end) {
+  const int total = static_cast<int>(words.size());
+  if (total == 0) return;
+  const int page = words[cursorIdx].pageIdx;
+  const int y = words[cursorIdx].y;
+
+  int target = cursorIdx;
+  if (end) {
+    for (int i = cursorIdx; i < total && words[i].pageIdx == page && words[i].y == y; ++i) target = i;
+  } else {
+    for (int i = cursorIdx; i >= 0 && words[i].pageIdx == page && words[i].y == y; --i) target = i;
+  }
+
+  if (target != cursorIdx) {
+    cursorIdx = target;  // same line — no needsPageSwitch
+    requestUpdate();
+  }
 }

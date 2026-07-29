@@ -195,14 +195,16 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                             "moveFinishedToReadFolder", StrId::STR_CAT_SYSTEM),
 
         // --- Clippings ---
-        SettingInfo::Enum(StrId::STR_CLIPPING_STORAGE, &CrossPointSettings::clippingStorage,
-                          {StrId::STR_CLIPPING_SINGLE_FILE, StrId::STR_CLIPPING_PER_BOOK}, "clippingStorage",
-                          StrId::STR_CAT_CLIPPINGS),
+        SettingInfo::Toggle(StrId::STR_CLIPPING_LOG, &CrossPointSettings::clippingLog, "clippingLog",
+                            StrId::STR_CAT_CLIPPINGS),
         SettingInfo::Enum(StrId::STR_CLIP_NAV_MODE, &CrossPointSettings::clipNavMode,
                           {StrId::STR_CLIP_NAV_LINE, StrId::STR_CLIP_NAV_WORD}, "clipNavMode",
                           StrId::STR_CAT_CLIPPINGS),
         SettingInfo::Toggle(StrId::STR_ANNOT_SHOW, &CrossPointSettings::annotationVisibility, "annotationVisibility",
                             StrId::STR_CAT_CLIPPINGS),
+        SettingInfo::Enum(StrId::STR_EXPORT_FORMAT, &CrossPointSettings::exportFormat,
+                          {StrId::STR_EXPORT_FMT_TXT, StrId::STR_EXPORT_FMT_JSON, StrId::STR_EXPORT_FMT_BOTH},
+                          "exportFormat", StrId::STR_CAT_CLIPPINGS),
 
         // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
         SettingInfo::DynamicString(

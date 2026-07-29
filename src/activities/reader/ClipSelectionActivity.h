@@ -82,14 +82,23 @@ class ClipSelectionActivity final : public Activity {
   int marginTop;
   int marginLeft;
 
-  std::unique_ptr<uint8_t[]> savedBuffer;
-  size_t savedBufferSize = 0;
+  // Re-rendered fresh on every cursor move from this cached Page (glyphs stay resident,
+  // so the redraw is cheap). Caching the Page — not a full 48 KB framebuffer copy — keeps
+  // peak heap low and avoids needing a contiguous 48 KB block on a fragmented heap.
+  std::unique_ptr<Page> currentPage;
   int currentDisplayPage = 0;
   int savedSectionPage = 0;
 
   int cursorIdx = 0;
   int startMarkIdx = -1;
   bool needsPageSwitch = false;
+
+  // Double-tap detection: two taps within CLIP_DOUBLE_TAP_MS jump the cursor to an edge.
+  // Up/Down -> top/bottom of the current page; Left/Right -> first/last word of the line.
+  unsigned long lastDownReleaseMs = 0;
+  unsigned long lastUpReleaseMs = 0;
+  unsigned long lastLeftReleaseMs = 0;
+  unsigned long lastRightReleaseMs = 0;
 
   ButtonNavigator buttonNavigator;
 
@@ -98,4 +107,8 @@ class ClipSelectionActivity final : public Activity {
   void applyWordStyle(const WordRef& word, const WordStyle& style) const;
   int lineEndForward(int idx) const;
   int lineEndBackward(int idx) const;
+  // Jump the cursor to the first / last word on the page it currently sits on.
+  void jumpToPageEdge(bool bottom);
+  // Jump the cursor to the first / last word on the line it currently sits on.
+  void jumpToLineEdge(bool end);
 };
